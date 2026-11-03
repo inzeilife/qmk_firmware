@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #define TAP_CODE_DELAY              8
 #define DYNAMIC_KEYMAP_MACRO_DELAY  8
+#define RELEASE_DEBOUNCE            10
 // This is the size of the EEPROM for the custom VIA-specific data
 #define EECONFIG_USER_DATA_SIZE     12
 
