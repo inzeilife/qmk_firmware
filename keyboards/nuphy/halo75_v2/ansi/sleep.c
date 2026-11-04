@@ -16,6 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "ansi.h"
+#include "mcu_pwr.h"
 #include "hal_usb.h"
 #include "usb_main.h"
 
@@ -27,7 +28,9 @@ extern uint16_t         no_act_time;
 extern bool             f_wakeup_prepare;
 extern bool             f_goto_sleep;
 
-uint8_t uart_send_cmd(uint8_t cmd, uint8_t ack_cnt, uint8_t delayms);
+static bool is_charging(void) {
+    return (dev_info.rf_charge & 0x01) || (dev_info.rf_charge == 0x03);
+}
 
 
 /**
@@ -47,15 +50,14 @@ void Sleep_Handle(void) {
         f_goto_sleep = 0;
 
         if(f_dev_sleep_enable) {
-            if (dev_info.rf_state == RF_CONNECT)
-                uart_send_cmd(CMD_SET_CONFIG, 5, 5);
-            else
-                uart_send_cmd(CMD_SLEEP, 5, 5);
+            if ((dev_info.link_mode != LINK_USB) && !is_charging()) {
+                enter_deep_sleep();
+                exit_deep_sleep();
+                rf_disconnect_time = 0;
+                return;
+            }
 
-            // power off led
-            writePinLow(DC_BOOST_PIN);
-            writePinLow(RGB_DRIVER_SDB1);
-            writePinLow(RGB_DRIVER_SDB2);
+            enter_light_sleep();
         }
 
         f_wakeup_prepare = 1;
@@ -65,26 +67,8 @@ void Sleep_Handle(void) {
     if (f_wakeup_prepare && (no_act_time < 10)) {
         f_wakeup_prepare = 0;
 
-        writePinHigh(DC_BOOST_PIN);
-        writePinHigh(RGB_DRIVER_SDB1);
-        writePinHigh(RGB_DRIVER_SDB2);
-
-        uart_send_cmd(CMD_HAND, 0, 1);
-
-        if (dev_info.link_mode == LINK_USB) {
-            #define USB_GETSTATUS_REMOTE_WAKEUP_ENABLED (2U)
-            if ((USB_DRIVER.status & USB_GETSTATUS_REMOTE_WAKEUP_ENABLED) ) {
-                usb_lld_wakeup_host(&USB_DRIVER);
-                wait_ms(50);
-                uint8_t timeout = 10;
-                while ((USB_DRIVER.state == USB_SUSPENDED) && (timeout--)) {
-                    usbWakeupHost(&USB_DRIVER);
-                    restart_usb_driver(&USB_DRIVER);
-                    wait_ms(50);
-                }
-                extern void m_break_all_key(void);
-                m_break_all_key();
-            }
+        if (f_dev_sleep_enable) {
+            exit_light_sleep();
         }
     }
 
