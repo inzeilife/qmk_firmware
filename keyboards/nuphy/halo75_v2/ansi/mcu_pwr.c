@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "ansi.h"
 #include "mcu_pwr.h"
+#include "rf_driver.h"
 #include "hal.h"
 #include "hal_lld.h"
 #include "hal_usb.h"
@@ -56,6 +57,7 @@ static void rf_wake(void) {
         dev_info.rf_state = RF_IDLE;
     }
     uart_send_cmd(CMD_HAND, 0, 1);
+    rf_start_wakeup_replay();
 }
 
 void pwr_rgb_led_off(void) {
@@ -85,6 +87,10 @@ bool is_rgb_led_on(void) {
     return rgb_led_on;
 }
 
+bool pwr_is_sleeping(void) {
+    return sleeping;
+}
+
 void led_pwr_sleep_handle(void) {
     if (rgb_led_on) {
         rgb_led_powered_off = true;
@@ -106,7 +112,9 @@ void led_pwr_wake_handle(void) {
 void enter_light_sleep(void) {
     if (sleeping) return;
 
+    rf_cancel_wakeup_replay();
     rf_sleep();
+    rf_start_wakeup_replay();
     led_pwr_sleep_handle();
 
     sleeping = true;
@@ -144,6 +152,9 @@ void enter_deep_sleep(void) {
         rf_sleep();
         led_pwr_sleep_handle();
     }
+
+    rf_cancel_wakeup_replay();
+    rf_start_wakeup_replay();
 
     for (uint8_t i = 0; i < MATRIX_COLS; i++) {
         gpio_set_pin_output(col_pins[i]);

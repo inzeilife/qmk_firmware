@@ -361,7 +361,8 @@ void long_press_key(void)
  */
 void m_break_all_key(void)
 {
-    
+    rf_set_queue_bypass(true);
+
     uint8_t report_buf[16];
     bool nkro_temp = keymap_config.nkro; 
 
@@ -392,6 +393,8 @@ void m_break_all_key(void)
     memset(uart_bit_report_buf, 0, sizeof(uart_bit_report_buf));
     memset(bitkb_report_buf, 0, sizeof(bitkb_report_buf));
     memset(bytekb_report_buf, 0, sizeof(bytekb_report_buf));
+
+    rf_set_queue_bypass(false);
 }
 
 /**

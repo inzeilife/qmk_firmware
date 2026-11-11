@@ -17,6 +17,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ansi.h"
 #include "uart.h"  // qmk uart.h
 #include "rf_driver.h"
+#include "rf_queue.h"
+#include "mcu_pwr.h"
 
 USART_MGR_STRUCT Usart_Mgr;
 #define RX_SBYTE    Usart_Mgr.RXDBuf[0]
@@ -42,6 +44,11 @@ uint16_t syskb_report            = 0;
 uint8_t  sync_lost               = 0;
 uint8_t  disconnect_delay        = 0;
 bool     uart_repeat_flag        = 0;
+bool     f_bit_kb_act            = 0;
+
+static bool     rf_wakeup_pending = false;
+static bool     rf_queue_bypass   = false;
+static uint32_t rf_wakeup_timer   = 0;
 
 
 extern DEV_INFO_STRUCT dev_info;
@@ -63,10 +70,57 @@ void           uart_receive_pro(void);
 void           m_break_all_key(void);
 uint16_t       host_last_consumer_usage(void);
 
+void rf_start_wakeup_replay(void) {
+    if (dev_info.link_mode == LINK_USB) return;
+
+    rf_wakeup_pending = true;
+    rf_wakeup_timer   = timer_read32();
+}
+
+void rf_cancel_wakeup_replay(void) {
+    rf_wakeup_pending = false;
+    rf_queue_clear();
+}
+
+void rf_set_queue_bypass(bool bypass) {
+    rf_queue_bypass = bypass;
+}
+
+static void send_or_queue(uint8_t report_type, uint8_t *report_buf, uint8_t report_size) {
+    if (!rf_queue_bypass && dev_info.link_mode != LINK_USB && (rf_wakeup_pending || !rf_queue_is_empty())) {
+        rf_report_t report = {
+            .cmd    = report_type,
+            .length = report_size,
+        };
+
+        if (report.length > RF_REPORT_BUFFER_SIZE) {
+            report.length = RF_REPORT_BUFFER_SIZE;
+        }
+        memcpy(report.buffer, report_buf, report.length);
+
+        if (!rf_queue_enqueue(&report)) {
+            rf_report_t discard;
+            rf_queue_dequeue(&discard);
+            rf_queue_enqueue(&report);
+        }
+        return;
+    }
+
+    uart_send_report(report_type, report_buf, report_size);
+}
+
+static void update_last_report(const rf_report_t *report) {
+    /* The byte/bit projection buffers are advanced when a report is generated.
+       Never copy a queued (historical) report back into them: doing so desyncs
+       the buffers from the NKRO diff baseline and leaves keys stuck. */
+    if (report->cmd == CMD_RPT_BIT_KB) {
+        f_bit_kb_act = 1;
+    }
+}
+
 /**
  * @brief Uart auto nkey send
  */
-bool f_bit_kb_act = 0;
 static void uart_auto_nkey_send(uint8_t *pre_bit_report, uint8_t *now_bit_report, uint8_t size)
 {
     uint8_t i, j, byte_index;
@@ -117,11 +171,11 @@ static void uart_auto_nkey_send(uint8_t *pre_bit_report, uint8_t *now_bit_report
 
     if (f_bit_send) {
         f_bit_kb_act = 1;
-        uart_send_report(CMD_RPT_BIT_KB, uart_bit_report_buf, 16);
+        send_or_queue(CMD_RPT_BIT_KB, uart_bit_report_buf, 16);
     }
 
     if (f_byte_send) {
-        uart_send_report(CMD_RPT_BYTE_KB, bytekb_report_buf, 8);
+        send_or_queue(CMD_RPT_BYTE_KB, bytekb_report_buf, 8);
     }
 }
 
@@ -131,20 +185,44 @@ static void uart_auto_nkey_send(uint8_t *pre_bit_report, uint8_t *now_bit_report
  */
 void uart_send_report_func(void)
 {
-    static uint32_t interval_timer = 0;
+    static uint32_t dequeue_timer = 0;
+    static uint32_t repeat_timer  = 0;
 
     if (dev_info.link_mode == LINK_USB) return;
+    if (pwr_is_sleeping()) return;
+    if (f_dial_sw_init_ok == 0) return;
 
-    if (timer_elapsed32(interval_timer) > 300) {
-        interval_timer = timer_read32();
+    if (rf_wakeup_pending) {
+        if (dev_info.rf_state == RF_CONNECT && rf_queue_is_empty()) {
+            rf_wakeup_pending = false;
+        } else if (dev_info.rf_state != RF_CONNECT && timer_elapsed32(rf_wakeup_timer) > 5000) {
+            rf_cancel_wakeup_replay();
+        }
+    }
+
+    if (dev_info.rf_state != RF_CONNECT) return;
+
+    if (!rf_queue_is_empty()) {
+        if (timer_elapsed32(dequeue_timer) > 25) {
+            rf_report_t report;
+            if (rf_queue_dequeue(&report)) {
+                update_last_report(&report);
+                uart_send_report(report.cmd, report.buffer, report.length);
+                dequeue_timer = timer_read32();
+            }
+        }
+        return;
+    }
+
+    if (timer_elapsed32(repeat_timer) > 300) {
+        repeat_timer = timer_read32();
         if (no_act_time <= 2000) {
             uart_send_report(CMD_RPT_BYTE_KB, bytekb_report_buf, 8);
             wait_us(200);
 
-            if(f_bit_kb_act)
-            uart_send_report(CMD_RPT_BIT_KB, uart_bit_report_buf, 16);
-        }
-        else {
+            if (f_bit_kb_act)
+                uart_send_report(CMD_RPT_BIT_KB, uart_bit_report_buf, 16);
+        } else {
             f_bit_kb_act = 0;
         }
     }
@@ -156,7 +234,7 @@ void uart_send_report_func(void)
  */
 void uart_send_consumer_report(report_extra_t *report) {
     no_act_time = 0;
-    uart_send_report(CMD_RPT_CONSUME, (uint8_t *)(&report->usage), 2);
+    send_or_queue(CMD_RPT_CONSUME, (uint8_t *)(&report->usage), 2);
 }
 
 /**
@@ -174,7 +252,7 @@ void uart_send_mouse_report(report_mouse_t *report) {
  */
 void uart_send_system_report(report_extra_t *report) {
     no_act_time = 0;
-    uart_send_report(CMD_RPT_SYS, (uint8_t *)(&report->usage), 2);
+    send_or_queue(CMD_RPT_SYS, (uint8_t *)(&report->usage), 2);
 }
 
 /**
@@ -184,7 +262,7 @@ void uart_send_system_report(report_extra_t *report) {
 void uart_send_report_keyboard(report_keyboard_t *report) {
     no_act_time      = 0;
     report->reserved = 0;
-    uart_send_report(CMD_RPT_BYTE_KB, &report->mods, 8);
+    send_or_queue(CMD_RPT_BYTE_KB, &report->mods, 8);
     memcpy(bytekb_report_buf, &report->mods, 8);
 }
 

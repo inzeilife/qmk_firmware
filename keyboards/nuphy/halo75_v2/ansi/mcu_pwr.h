@@ -27,6 +27,8 @@ void exit_light_sleep(void);
 void enter_deep_sleep(void);
 void exit_deep_sleep(void);
 
+bool pwr_is_sleeping(void);
+
 void led_pwr_sleep_handle(void);
 void led_pwr_wake_handle(void);
 

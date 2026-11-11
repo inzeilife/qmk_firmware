@@ -1,4 +1,4 @@
-SRC += side.c rf.c sleep.c rf_driver.c mcu_pwr.c
+SRC += side.c rf.c sleep.c rf_driver.c mcu_pwr.c rf_queue.c
 
 OPT ?= 2
 CUSTOM_MATRIX = lite
