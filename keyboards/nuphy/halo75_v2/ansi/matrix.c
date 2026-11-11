@@ -19,6 +19,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "matrix.h"
 #include "debounce.h"
 #include "quantum.h"
+#include "timer.h"
+#include "rf_driver.h"
 
 #define rowA_bits (PAL_PORT_BIT(PAL_PAD(A0)) | PAL_PORT_BIT(PAL_PAD(A1)) | PAL_PORT_BIT(PAL_PAD(A2)) | PAL_PORT_BIT(PAL_PAD(A3)))
 #define rowC_bits (PAL_PORT_BIT(PAL_PAD(C14)) | PAL_PORT_BIT(PAL_PAD(C15)))
@@ -31,6 +33,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 extern matrix_row_t raw_matrix[MATRIX_ROWS];
 extern matrix_row_t matrix[MATRIX_ROWS];
+
+static int8_t   wake_tap_row   = -1;
+static int8_t   wake_tap_col   = -1;
+static uint32_t wake_tap_timer = 0;
+
+#define WAKE_TAP_TIMEOUT_MS 5000
 
 static inline matrix_row_t read_cols(void) {
     uint16_t portA_pin_state = palReadPort(PAL_PORT(A0));
@@ -78,5 +86,55 @@ bool matrix_scan_custom(matrix_row_t current_matrix[]) {
         current_matrix[current_row] = cols;
     }
 
+    if (wake_tap_row >= 0) {
+        matrix_row_t tap_bit = (matrix_row_t)1 << wake_tap_col;
+
+        if (current_matrix[wake_tap_row] & tap_bit) {
+            /* Key is still held down, the regular scan path reports it. */
+            wake_tap_row = -1;
+        } else if (!rf_wakeup_replay_active()) {
+            /* Host link is ready: emit the buffered tap as a single press. The
+               next scan drops the bit again, which the debouncer turns into a
+               clean release. */
+            current_matrix[wake_tap_row] |= tap_bit;
+            changed      = true;
+            wake_tap_row = -1;
+        } else if (timer_elapsed32(wake_tap_timer) >= WAKE_TAP_TIMEOUT_MS) {
+            wake_tap_row = -1;
+        }
+    }
+
     return changed;
+}
+
+void matrix_capture_wake(void) {
+    matrix_row_t captured[MATRIX_ROWS] = {0};
+    int8_t       row                   = -1;
+    int8_t       col                   = -1;
+    uint8_t      count                 = 0;
+
+    wake_tap_row = -1;
+    wake_tap_col = -1;
+
+    matrix_scan_custom(captured);
+
+    for (uint8_t current_row = 0; current_row < MATRIX_ROWS; current_row++) {
+        matrix_row_t bits = captured[current_row];
+
+        while (bits) {
+            col = __builtin_ctz((unsigned int)bits);
+            bits &= bits - 1;
+            count++;
+            row = current_row;
+        }
+    }
+
+    /* A snapshot with more than one key is a typing roll, not a lost tap. It
+       must not be replayed as a chord, or keys that the regular scan reports
+       as well show up twice. */
+    if (count == 1) {
+        wake_tap_row   = row;
+        wake_tap_col   = col;
+        wake_tap_timer = timer_read32();
+    }
 }

@@ -48,6 +48,7 @@ bool     f_bit_kb_act            = 0;
 
 static bool     rf_wakeup_pending = false;
 static bool     rf_queue_bypass   = false;
+static bool     rf_resync_done    = false;
 static uint32_t rf_wakeup_timer   = 0;
 
 
@@ -67,12 +68,14 @@ void           uart_send_report(uint8_t report_type, uint8_t *report_buf, uint8_
 void           UART_Send_Bytes(uint8_t *Buffer, uint32_t Length);
 uint8_t        get_checksum(uint8_t *buf, uint8_t len);
 void           uart_receive_pro(void);
+void           uart_send_report_nkro(report_nkro_t *report);
 void           m_break_all_key(void);
 uint16_t       host_last_consumer_usage(void);
 
 void rf_start_wakeup_replay(void) {
     if (dev_info.link_mode == LINK_USB) return;
 
+    rf_resync_done    = false;
     rf_wakeup_pending = true;
     rf_wakeup_timer   = timer_read32();
 }
@@ -84,6 +87,10 @@ void rf_cancel_wakeup_replay(void) {
 
 void rf_set_queue_bypass(bool bypass) {
     rf_queue_bypass = bypass;
+}
+
+bool rf_wakeup_replay_active(void) {
+    return rf_wakeup_pending;
 }
 
 static void send_or_queue(uint8_t report_type, uint8_t *report_buf, uint8_t report_size) {
@@ -116,6 +123,43 @@ static void update_last_report(const rf_report_t *report) {
     if (report->cmd == CMD_RPT_BIT_KB) {
         f_bit_kb_act = 1;
     }
+}
+
+/**
+ * @brief  Clear every key the host still thinks is down from the previous RF
+ *         session. Must run before queued wake reports are replayed.
+ */
+static void rf_clear_host_state(void) {
+    uint8_t zero_report[16] = {0};
+
+    rf_set_queue_bypass(true);
+    uart_send_report(CMD_RPT_BYTE_KB, zero_report, 8);
+    if (keymap_config.nkro || f_bit_kb_act) {
+        uart_send_report(CMD_RPT_BIT_KB, zero_report, 16);
+    }
+    rf_set_queue_bypass(false);
+}
+
+/**
+ * @brief  Force the host state to match the authoritative QMK report.
+ */
+static void rf_resync_host_state(void) {
+    rf_set_queue_bypass(true);
+
+    /* Rebuild the byte/bit projection from scratch so it cannot carry state
+       left over from the pre-sleep session. */
+    memset(bytekb_report_buf, 0, sizeof(bytekb_report_buf));
+    memset(uart_bit_report_buf, 0, sizeof(uart_bit_report_buf));
+    memset(bitkb_report_buf, 0, sizeof(bitkb_report_buf));
+
+    if (keymap_config.nkro) {
+        uart_send_report_nkro(nkro_report);
+    } else {
+        memcpy(bytekb_report_buf, &keyboard_report->mods, 8);
+        uart_send_report(CMD_RPT_BYTE_KB, bytekb_report_buf, 8);
+    }
+
+    rf_set_queue_bypass(false);
 }
 
 /**
@@ -193,9 +237,17 @@ void uart_send_report_func(void)
     if (f_dial_sw_init_ok == 0) return;
 
     if (rf_wakeup_pending) {
-        if (dev_info.rf_state == RF_CONNECT && rf_queue_is_empty()) {
-            rf_wakeup_pending = false;
-        } else if (dev_info.rf_state != RF_CONNECT && timer_elapsed32(rf_wakeup_timer) > 5000) {
+        if (dev_info.rf_state == RF_CONNECT) {
+            if (!rf_resync_done) {
+                /* Drop keys stuck on the host side by the previous session. */
+                rf_clear_host_state();
+                rf_resync_done = true;
+            }
+            if (rf_queue_is_empty()) {
+                rf_resync_host_state();
+                rf_wakeup_pending = false;
+            }
+        } else if (timer_elapsed32(rf_wakeup_timer) > 5000) {
             rf_cancel_wakeup_replay();
         }
     }

@@ -36,6 +36,7 @@ extern uint16_t        rf_linking_time;
 extern uint8_t uart_send_cmd(uint8_t cmd, uint8_t ack_cnt, uint8_t delayms);
 extern void    m_break_all_key(void);
 extern void    matrix_init_custom(void);
+extern void    matrix_capture_wake(void);
 
 static const pin_t row_pins[MATRIX_ROWS] = MATRIX_ROW_PINS;
 static const pin_t col_pins[MATRIX_COLS] = MATRIX_COL_PINS;
@@ -199,6 +200,7 @@ void exit_deep_sleep(void) {
 
     stm32_clock_init();
     matrix_init_custom();
+    matrix_capture_wake();
 
     gpio_set_pin_input_high(DEV_MODE_PIN);
     gpio_set_pin_input_high(SYS_MODE_PIN);

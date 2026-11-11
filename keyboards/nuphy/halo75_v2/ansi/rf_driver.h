@@ -24,3 +24,4 @@ extern host_driver_t rf_host_driver;
 void rf_start_wakeup_replay(void);
 void rf_cancel_wakeup_replay(void);
 void rf_set_queue_bypass(bool bypass);
+bool rf_wakeup_replay_active(void);
